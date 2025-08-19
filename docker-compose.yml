@@ -1,52 +1,167 @@
 version: '3.8'
 
 services:
-  app:
-    build: .
-    ports:
-      - "5000:5000"
-    environment:
-      - FLASK_ENV=development
-      - FLASK_DEBUG=True
-    env_file:
-      - .env
-    volumes:
-      - ./app:/app/app
-      - ./credentials:/app/credentials
-    depends_on:
-      - postgres
-    networks:
-      - shipments-network
-
+  # Base de datos PostgreSQL
   postgres:
-    image: postgres:15-alpine
+    image: postgres:15
+    container_name: shipments-postgres
     environment:
       POSTGRES_DB: shipments_db
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: shipments123
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d
     networks:
       - shipments-network
+    restart: unless-stopped
 
+  # PgAdmin para administración de BD
   pgadmin:
     image: dpage/pgadmin4:latest
+    container_name: shipments-pgadmin
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@shipments.com
-      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_DEFAULT_PASSWORD: admin123
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
     ports:
       - "8080:80"
-    depends_on:
-      - postgres
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
     networks:
       - shipments-network
+    restart: unless-stopped
+    depends_on:
+      - postgres
+
+  # Division Service (Cloud Run 1)
+  division-service:
+    build:
+      context: .
+      dockerfile: services/division_service/Dockerfile
+    container_name: division-service
+    environment:
+      APP_VERSION: "2.0.0"
+      ENVIRONMENT: "development"
+      DEBUG: "true"
+      PORT: "8081"
+      GOOGLE_CLOUD_PROJECT: "shipments-dev-project"
+      BUCKET_JSON_PENDIENTES: "json-pendientes-dev"
+      BUCKET_JSON_A_PROCESAR: "json-a-procesar-dev"
+      DB_HOST: "postgres"
+      DB_PORT: "5432"
+      DB_NAME: "shipments_db"
+      DB_USER: "postgres"
+      DB_PASSWORD: "shipments123"
+      DB_SSL_MODE: "disable"
+      MAX_SHIPMENTS_PER_FILE: "100"
+      IMAGE_PROCESSING_SERVICE_URL: "http://image-processing-service:8082"
+      EMAIL_SERVICE_URL: "http://email-service:8083"
+      LOG_LEVEL: "DEBUG"
+    ports:
+      - "8081:8081"
+    networks:
+      - shipments-network
+    restart: unless-stopped
+    depends_on:
+      - postgres
+
+  # Image Processing Service (Cloud Run 2)
+  image-processing-service:
+    build:
+      context: .
+      dockerfile: services/image_processing_service/Dockerfile
+    container_name: image-processing-service
+    environment:
+      APP_VERSION: "2.0.0"
+      ENVIRONMENT: "development"
+      DEBUG: "true"
+      PORT: "8082"
+      BUCKET_IMAGENES_TEMP: "imagenes-temp-dev"
+      BUCKET_IMAGENES_ORIGINALES: "imagenes-originales-dev"
+      DB_HOST: "postgres"
+      DB_PORT: "5432"
+      DB_NAME: "shipments_db"
+      DB_USER: "postgres"
+      DB_PASSWORD: "shipments123"
+      SIGNED_URL_EXPIRATION_HOURS: "2"
+      TEMP_FILES_CLEANUP_HOURS: "24"
+      EMAIL_SERVICE_URL: "http://email-service:8083"
+      LOG_LEVEL: "DEBUG"
+    ports:
+      - "8082:8082"
+    volumes:
+      - /tmp/shipments_processing:/tmp/shipments_processing
+    networks:
+      - shipments-network
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - division-service
+
+  # Email Service (Cloud Run 3)
+  email-service:
+    build:
+      context: .
+      dockerfile: services/email_service/Dockerfile
+    container_name: email-service
+    environment:
+      APP_VERSION: "2.0.0"
+      ENVIRONMENT: "development"
+      DEBUG: "true"
+      PORT: "8083"
+      DB_HOST: "postgres"
+      DB_PORT: "5432"
+      DB_NAME: "shipments_db"
+      DB_USER: "postgres"
+      DB_PASSWORD: "shipments123"
+      SMTP_HOST: "mailhog"
+      SMTP_PORT: "1025"
+      FROM_EMAIL: "noreply@shipments-dev.com"
+      LOG_LEVEL: "DEBUG"
+    ports:
+      - "8083:8083"
+    networks:
+      - shipments-network
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - mailhog
+
+  # MailHog para desarrollo de emails
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: mailhog
+    ports:
+      - "8025:8025"  # Web UI
+      - "1025:1025"  # SMTP
+    networks:
+      - shipments-network
+    restart: unless-stopped
+
+  # Redis para caché
+  redis:
+    image: redis:7-alpine
+    container_name: shipments-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - shipments-network
+    restart: unless-stopped
+    command: redis-server --appendonly yes
 
 volumes:
   postgres_data:
+  pgadmin_data:
+  redis_data:
 
 networks:
   shipments-network:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
