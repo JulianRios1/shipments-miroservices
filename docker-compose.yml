@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=development
+      - FLASK_DEBUG=True
+    env_file:
+      - .env
+    volumes:
+      - ./app:/app/app
+      - ./credentials:/app/credentials
+    depends_on:
+      - postgres
+    networks:
+      - shipments-network
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: shipments_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    networks:
+      - shipments-network
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@shipments.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "8080:80"
+    depends_on:
+      - postgres
+    networks:
+      - shipments-network
+
+volumes:
+  postgres_data:
+
+networks:
+  shipments-network:
+    driver: bridge

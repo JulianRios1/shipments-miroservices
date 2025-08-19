@@ -1,0 +1,30 @@
+# Framework web
+Flask==2.3.3
+Flask-CORS==4.0.0
+
+# Base de datos
+psycopg2-binary==2.9.7
+SQLAlchemy==2.0.21
+Flask-SQLAlchemy==3.0.5
+
+# GCP SDK
+google-cloud-storage==2.10.0
+google-cloud-pubsub==2.18.4
+google-cloud-logging==3.8.0
+google-auth==2.23.3
+
+# Utilidades
+python-dotenv==1.0.0
+requests==2.31.0
+
+# Validación
+marshmallow==3.20.1
+
+# Testing
+pytest==7.4.2
+pytest-cov==4.1.0
+
+# Desarrollo
+black==23.9.1
+flake8==6.1.0
+isort==5.12.0
