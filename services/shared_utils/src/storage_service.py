@@ -10,8 +10,8 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
 from google.cloud import storage
 from google.cloud.exceptions import NotFound, GoogleCloudError
-from .config import config
-from .logger import setup_logger
+from config import config
+from logger import setup_logger
 
 
 class CloudStorageService:

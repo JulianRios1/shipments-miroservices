@@ -1,0 +1,6 @@
+# Ignorar todo
+*
+# Incluir solo lo necesario
+!requirements.txt
+!services/shared_utils/
+!services/image_processing_service/

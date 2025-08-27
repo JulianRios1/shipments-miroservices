@@ -63,7 +63,6 @@ class BaseConfig:
                                   '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         
         # Configuración de URLs de servicios (Cloud Run)
-        self.DIVISION_SERVICE_URL = os.getenv('DIVISION_SERVICE_URL', 'http://localhost:8081')
         self.IMAGE_PROCESSING_SERVICE_URL = os.getenv('IMAGE_PROCESSING_SERVICE_URL', 'http://localhost:8082')
         self.EMAIL_SERVICE_URL = os.getenv('EMAIL_SERVICE_URL', 'http://localhost:8083')
         
@@ -172,7 +171,6 @@ class BaseConfig:
                 'errors': self.PUBSUB_TOPIC_ERRORS
             },
             'service_urls': {
-                'division_service': self.DIVISION_SERVICE_URL,
                 'image_processing_service': self.IMAGE_PROCESSING_SERVICE_URL,
                 'email_service': self.EMAIL_SERVICE_URL
             }

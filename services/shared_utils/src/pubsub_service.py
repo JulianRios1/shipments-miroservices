@@ -9,8 +9,8 @@ from datetime import datetime
 from typing import Dict, Any, Optional, Callable
 from google.cloud import pubsub_v1
 from google.cloud.exceptions import GoogleCloudError
-from .config import config
-from .logger import setup_logger
+from config import config
+from logger import setup_logger
 
 
 class PubSubService:
@@ -59,7 +59,7 @@ class PubSubService:
     def publish_file_processed(self, processing_uuid: str, file_data: Dict[str, Any], 
                              trace_id: Optional[str] = None) -> str:
         """
-        Publica mensaje de archivo procesado (División completada)
+        Publica mensaje de archivo procesado (Cloud Function independiente)
         
         Args:
             processing_uuid: UUID del procesamiento
@@ -76,7 +76,7 @@ class PubSubService:
                 'file_data': file_data,
                 'timestamp': datetime.now().isoformat(),
                 'trace_id': trace_id or str(uuid.uuid4()),
-                'service_origin': 'division-service'
+                'service_origin': 'cloud-function'
             }
             
             return self._publish_message(
@@ -217,7 +217,7 @@ class PubSubService:
                 'workflow_data': workflow_data,
                 'timestamp': datetime.now().isoformat(),
                 'trace_id': trace_id or str(uuid.uuid4()),
-                'service_origin': 'division-service'
+                'service_origin': 'cloud-function'
             }
             
             # Usar el tópico de archivos procesados para activar workflow

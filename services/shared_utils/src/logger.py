@@ -66,7 +66,7 @@ class StructuredLogger:
         log_level = logging.INFO
         if hasattr(logging, 'INFO'):  # Verificar que INFO existe
             try:
-                from .config import config
+                from config import config
                 log_level = getattr(logging, config.LOG_LEVEL.upper(), logging.INFO)
             except ImportError:
                 log_level = logging.INFO

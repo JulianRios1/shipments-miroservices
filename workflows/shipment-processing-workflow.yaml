@@ -1,6 +1,6 @@
 # Shipment Processing Workflow - ARQUITECTURA EMPRESARIAL COMPLETA
-# Orquesta la secuencia completa: División → Procesamiento de Imágenes → Email → Cleanup
-# Implementa el flujo empresarial especificado con servicios reales
+# Orquesta la secuencia: Procesamiento de Imágenes → Email → Cleanup
+# División se maneja por Cloud Function independiente
 
 main:
   params: [input]
@@ -12,24 +12,8 @@ main:
           workflow_input: ${input}
         result: validation_result
     
-    # PASO 2: Verificar que la división fue exitosa
-    - check_division_status:
-        call: http.get
-        args:
-          url: ${sys.get_env("DIVISION_SERVICE_URL") + "/process-by-uuid/" + input.processing_uuid}
-          headers:
-            Content-Type: "application/json"
-          timeout: 30
-        result: division_status
-        
-    - validate_division:
-        switch:
-          - condition: ${division_status.body.status == "completed"}
-            next: start_image_processing
-          - condition: true
-            next: handle_division_error
-    
-    # PASO 3: Procesar imágenes por paquetes EN PARALELO
+    # PASO 2: Procesar imágenes por paquetes EN PARALELO
+    # (División ya completada por Cloud Function independiente)
     - start_image_processing:
         call: process_packages_in_parallel
         args:
@@ -91,17 +75,16 @@ main:
     - update_final_status:
         call: http.post
         args:
-          url: ${sys.get_env("DIVISION_SERVICE_URL") + "/update-workflow-completion"}
+          url: ${sys.get_env("IMAGE_PROCESSING_SERVICE_URL") + "/update-workflow-completion"}
           body:
             processing_uuid: ${input.processing_uuid}
             workflow_completed: true
             email_sent: ${email_result.code == 200}
             cleanup_scheduled: ${cleanup_scheduled.success}
-            completion_summary: {
-              packages_processed: ${len(input.packages)},
-              images_processed: ${image_processing_result.total_images},
+            completion_summary:
+              packages_processed: ${len(input.packages)}
+              images_processed: ${image_processing_result.total_images}
               urls_generated: ${len(signed_urls_collection.urls)}
-            }
         result: final_update
     
     # Resultado final exitoso
@@ -110,7 +93,6 @@ main:
           status: "completed"
           processing_uuid: ${input.processing_uuid}
           workflow_completed_at: ${text.split(time.format(sys.now()), "T")[0] + "T" + text.split(time.format(sys.now()), "T")[1]}
-          division_result: ${division_status.body}
           image_processing_result: ${image_processing_result}
           email_result: ${email_result.body}
           signed_urls_count: ${len(signed_urls_collection.urls)}
@@ -118,20 +100,11 @@ main:
           final_status: ${final_update.body}
     
     # MANEJO DE ERRORES
-    - handle_division_error:
-        call: send_error_notification
-        args:
-          error_type: "division_error"
-          error_message: ${"División falló: " + division_status.body.error_message}
-          processing_uuid: ${input.processing_uuid}
-        result: error_notification
-        next: return_error
-    
     - handle_image_processing_error:
         call: send_error_notification
         args:
           error_type: "image_processing_error" 
-          error_message: ${"Procesamiento de imágenes incompleto: " + completeness_check.error}
+          error_message: "Procesamiento de imágenes incompleto"
           processing_uuid: ${input.processing_uuid}
         result: error_notification
         next: return_error

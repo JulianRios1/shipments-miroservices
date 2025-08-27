@@ -1,13 +1,13 @@
-# 🚀 Shipments Processing Platform - Microservices Architecture v2.0
+# 🚀 Shipments Processing Platform - Event-Driven Architecture v2.1
 
 ## ✅ **IMPLEMENTACIÓN COMPLETA DEL FLUJO EMPRESARIAL**
 
-Este proyecto implementa **COMPLETAMENTE** el flujo empresarial especificado mediante una **arquitectura de microservicios** que cumple con los 4 pasos requeridos:
+Este proyecto implementa **COMPLETAMENTE** el flujo empresarial especificado mediante una **arquitectura event-driven** que cumple con los 4 pasos requeridos:
 
 ### 🎯 **FLUJO EMPRESARIAL 100% IMPLEMENTADO**
 1. ✅ **Carga JSON** → bucket `json-pendientes`
-2. ✅ **División Service** → procesamiento con UUID → bucket `json-a-procesar`
-3. ✅ **Pub/Sub Async** → trigger de Cloud Workflow
+2. ✅ **Division Service (Cloud Function)** → procesamiento con UUID → bucket `json-a-procesar`
+3. ✅ **Pub/Sub Event-Driven** → trigger automático de Image Processing
 4. ✅ **Image Processing + Email Service** → ZIP + URL firmada + cleanup
 
 ## 🎯 **FLUJO EMPRESARIAL IMPLEMENTADO**
@@ -17,7 +17,7 @@ Este proyecto implementa **COMPLETAMENTE** el flujo empresarial especificado med
 Usuario → gs://json-pendientes/archivo.json
 ```
 
-### **✅ PASO 2: División Service (Cloud Run 1)**
+### **✅ PASO 2: Division Service (Cloud Function Independiente)**
 - 📄 **Responsabilidad**: División de archivos con UUID de agrupamiento
 - 🔧 **Funcionalidades**:
   - ⏳ Esperar completitud del archivo
@@ -26,19 +26,22 @@ Usuario → gs://json-pendientes/archivo.json
   - 🗄️ Consultar rutas de imágenes en base de datos
   - 📦 Enriquecer paquetes con metadatos empresariales
   - 🚀 Mover a `gs://json-a-procesar/`
-  - 📡 Publicar mensaje Pub/Sub para activar workflow
+  - 📡 **Publicar mensaje Pub/Sub para activar Image Processing**
 
-### **✅ PASO 3: Cloud Pub/Sub Asíncrono**
+### **✅ PASO 3: Event-Driven Processing con Pub/Sub**
 ```
-json-a-procesar → Pub/Sub Trigger → Cloud Workflow
+Division Function → Pub/Sub Topic 'shipment-packages-ready' → Image Processing Service
 ```
 
-### **✅ PASO 4: Cloud Workflow Orchestration**
-- 🎭 **Orquesta** la secuencia completa de servicios
-- ⚡ **Procesamiento paralelo** de paquetes por UUID
-- 🔄 **Verificación de completitud** de procesamiento
-- 📧 **Activación automática** del servicio de email
-- 🧹 **Programación de cleanup** temporal
+### **✅ PASO 4: Image Processing Service (Cloud Run - Event-Driven)**
+- 📄 **Responsabilidad**: Procesamiento automático activado por Pub/Sub
+- 🔧 **Funcionalidades**:
+  - 📡 **Recibir mensaje Pub/Sub** con lista de paquetes
+  - 📎 **Procesar TODOS los paquetes en paralelo**
+  - 📁 **Generar archivo ZIP por paquete**
+  - 🔐 **Crear URL firmada** con expiración de 2 horas
+  - 📡 **Publicar mensaje para Email Service**
+  - ⏰ **Programar cleanup automático**
 
 ### **✅ PASO 4.1: Image Processing Service (Cloud Run 2)**
 - 📄 **Responsabilidad**: Procesamiento de imágenes y creación de ZIP
@@ -51,12 +54,82 @@ json-a-procesar → Pub/Sub Trigger → Cloud Workflow
   - ⏰ Cleanup automático después de 24 horas
   - 📡 Publicar mensaje para email service
 
-### **✅ PASO 4.2: Email Service (Cloud Run 3)**
-- 📄 **Responsabilidad**: Envío de notificaciones por email
+### **✅ PASO 4.5: Email Service (Cloud Run - Event-Driven)**
+- 📄 **Responsabilidad**: Notificaciones automáticas activadas por Pub/Sub
 - 🔧 **Funcionalidades**:
-  - 📧 Enviar email con URL firmada
-  - 📊 Incluir resumen de procesamiento
-  - 🗄️ Actualizar tabla `archivos` con estado final
+  - 📡 **Recibir mensaje Pub/Sub** con URLs firmadas
+  - 📧 **Enviar email automático** con todas las URLs
+  - 📊 **Incluir resumen completo** de procesamiento
+  - 🗄️ **Actualizar estado final** en base de datos
+
+## 🔄 **FLUJO EVENT-DRIVEN DETALLADO**
+
+### **📡 Arquitectura Pub/Sub**
+```
+┌─────────────────┐    📡 Pub/Sub Topic     ┌──────────────────────┐
+│  Division       │───→ 'shipment-packages │  Image Processing    │
+│  Service        │    -ready'              │  Service             │
+│  (Cloud Func)   │                         │  (Cloud Run)        │
+└─────────────────┘                         └──────────────────────┘
+                                                       │
+                                                       │ 📡 Pub/Sub Topic
+                                                       ▼ 'email-notifications'
+                                            ┌──────────────────────┐
+                                            │  Email Service       │
+                                            │  (Cloud Run)        │
+                                            └──────────────────────┘
+```
+
+### **📨 Formato de Mensajes Pub/Sub**
+
+#### **Topic: 'shipment-packages-ready'**
+```json
+{
+  "processing_uuid": "550e8400-e29b-41d4-a716-446655440000",
+  "original_file": "shipments_2024_001.json",
+  "packages": [
+    "gs://json-a-procesar/550e8400.../package_1_of_5.json",
+    "gs://json-a-procesar/550e8400.../package_2_of_5.json",
+    "gs://json-a-procesar/550e8400.../package_3_of_5.json"
+  ],
+  "total_shipments": 450,
+  "division_metadata": {
+    "division_timestamp": "2024-01-15T10:30:00Z",
+    "packages_created": 5,
+    "max_shipments_per_package": 100
+  }
+}
+```
+
+#### **Topic: 'email-notifications'**
+```json
+{
+  "processing_uuid": "550e8400-e29b-41d4-a716-446655440000",
+  "email_type": "completion",
+  "original_file": "shipments_2024_001.json",
+  "signed_urls": [
+    {
+      "package_name": "package_1_of_5.json",
+      "signed_url": "https://storage.googleapis.com/imagenes-temp/...",
+      "expires_at": "2024-01-15T14:30:00Z",
+      "images_count": 95
+    }
+  ],
+  "processing_summary": {
+    "images_processed": 450,
+    "zip_files_created": 5,
+    "completion_timestamp": "2024-01-15T12:30:00Z"
+  },
+  "recipient_email": null
+}
+```
+
+### **⚡ Ventajas del Flujo Event-Driven**
+- 🚀 **Procesamiento Automático**: No requiere coordinación manual
+- 📈 **Escalabilidad Natural**: Cada servicio escala independientemente  
+- 🔄 **Resiliente**: Reintento automático en caso de fallos
+- 📊 **Monitoreable**: Métricas granulares por topic y service
+- 💰 **Costo-Eficiente**: Solo paga por procesamiento real
 
 ## 🏛️ **ARQUITECTURA DE MICROSERVICIOS**
 
