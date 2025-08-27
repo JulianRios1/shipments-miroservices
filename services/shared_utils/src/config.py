@@ -51,11 +51,6 @@ class BaseConfig:
         self.MAX_FILE_SIZE_MB = int(os.getenv('MAX_FILE_SIZE_MB', 100))
         self.CHUNK_SIZE = int(os.getenv('CHUNK_SIZE', 8192))
         
-        # Configuración de Pub/Sub
-        self.PUBSUB_TOPIC_FILE_PROCESSED = os.getenv('PUBSUB_TOPIC_FILE_PROCESSED', 'file-processed')
-        self.PUBSUB_TOPIC_IMAGES_READY = os.getenv('PUBSUB_TOPIC_IMAGES_READY', 'images-ready')
-        self.PUBSUB_TOPIC_EMAIL_SEND = os.getenv('PUBSUB_TOPIC_EMAIL_SEND', 'email-send')
-        self.PUBSUB_TOPIC_ERRORS = os.getenv('PUBSUB_TOPIC_ERRORS', 'processing-errors')
         
         # Configuración de logging
         self.LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
@@ -164,12 +159,6 @@ class BaseConfig:
             'max_shipments_per_file': self.MAX_SHIPMENTS_PER_FILE,
             'batch_size': self.BATCH_SIZE,
             'log_level': self.LOG_LEVEL,
-            'pubsub_topics': {
-                'file_processed': self.PUBSUB_TOPIC_FILE_PROCESSED,
-                'images_ready': self.PUBSUB_TOPIC_IMAGES_READY,
-                'email_send': self.PUBSUB_TOPIC_EMAIL_SEND,
-                'errors': self.PUBSUB_TOPIC_ERRORS
-            },
             'service_urls': {
                 'image_processing_service': self.IMAGE_PROCESSING_SERVICE_URL,
                 'email_service': self.EMAIL_SERVICE_URL

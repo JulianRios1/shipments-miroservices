@@ -23,7 +23,6 @@ sys.path.insert(0, '/app/services/shared_utils/src')
 from config import config
 from logger import setup_logger
 from database_service import database_service
-from pubsub_service import pubsub_service
 
 from services.email_sender import EmailSender
 from services.template_manager import TemplateManager
@@ -67,7 +66,6 @@ def status_check():
             'dependencies': {
                 'database': 'healthy' if db_healthy else 'unhealthy',
                 'smtp_server': 'healthy' if email_healthy else 'unhealthy',
-                'pubsub': 'healthy'  # Asumimos healthy si no hay errores
             },
             'configuration': {
                 'smtp_host': config.SMTP_HOST,
