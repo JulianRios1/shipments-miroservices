@@ -163,3 +163,9 @@ temp/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Archived components (not in use)
+archived-components/
+deployment-scripts/
+test-data/
+docs

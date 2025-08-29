@@ -95,7 +95,7 @@ class NotificationManager:
                 'error_type': error_type,
                 'error_message': error_message,
                 'processing_uuid': processing_uuid,
-                **additional_data or {}
+                **(additional_data if additional_data else {})
             }
             
             # Enviar a email de administración

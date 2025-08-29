@@ -1,224 +1,136 @@
-# Shipment Processing Workflow - ARQUITECTURA EMPRESARIAL COMPLETA
-# Orquesta la secuencia: Procesamiento de Imágenes → Email → Cleanup
-# División se maneja por Cloud Function independiente
+# Shipment Processing Workflow - Versión Simple
+# Compatible con ejecución desde consola GCP
 
 main:
   params: [input]
   steps:
-    # PASO 1: Validar input del workflow
-    - validate_input:
-        call: validate_workflow_input
-        args:
-          workflow_input: ${input}
-        result: validation_result
+    # Inicializar con valores por defecto si no vienen en el input
+    - init:
+        assign:
+          - processing_uuid: ${default(map.get(input, "processing_uuid"), "test-uuid-default")}
+          - packages: ${default(map.get(input, "packages"), [])}
+          - original_file: ${default(map.get(input, "original_file"), "test.json")}
+          - total_shipments: ${default(map.get(input, "total_shipments"), 0)}
+          - image_service_url: "https://image-processing-simple-914439941933.us-central1.run.app"
+          - email_service_url: "https://email-simple-914439941933.us-central1.run.app"
+          - processed_packages: []
+          - failed_packages: []
+          - has_packages: false
     
-    # PASO 2: Procesar imágenes por paquetes EN PARALELO
-    # (División ya completada por Cloud Function independiente)
-    - start_image_processing:
-        call: process_packages_in_parallel
-        args:
-          processing_uuid: ${input.processing_uuid}
-          packages: ${input.packages}
-          total_packages: ${len(input.packages)}
-        result: image_processing_result
-    
-    # PASO 4: Verificar completitud de procesamiento de imágenes
-    - verify_image_completeness:
-        call: verify_all_packages_processed
-        args:
-          processing_uuid: ${input.processing_uuid}
-          expected_packages: ${len(input.packages)}
-          image_processing_result: ${image_processing_result}
-        result: completeness_check
-        
-    - validate_image_processing:
+    # Verificar si hay paquetes
+    - check_if_packages_exist:
         switch:
-          - condition: ${completeness_check.complete == true}
-            next: collect_signed_urls
-          - condition: true
-            next: handle_image_processing_error
+          - condition: ${len(packages) > 0}
+            assign:
+              - has_packages: true
     
-    # PASO 5: Recopilar URLs firmadas de todos los paquetes
-    - collect_signed_urls:
-        call: collect_all_signed_urls
-        args:
-          processing_uuid: ${input.processing_uuid}
-          image_processing_result: ${image_processing_result}
-        result: signed_urls_collection
+    # Procesar paquetes si existen
+    - process_if_exists:
+        switch:
+          - condition: ${has_packages}
+            steps:
+              - process_all_packages:
+                  for:
+                    value: package_uri
+                    in: ${packages}
+                    steps:
+                      - process_package:
+                          try:
+                            steps:
+                              - call_processor:
+                                  call: http.post
+                                  args:
+                                    url: ${image_service_url + "/process-package"}
+                                    headers:
+                                      Content-Type: "application/json"
+                                    body:
+                                      processing_uuid: ${processing_uuid}
+                                      package_uri: ${package_uri}
+                                      package_name: "package"
+                                    timeout: 300
+                                  result: pkg_result
+                              
+                              - add_success:
+                                  assign:
+                                    - processed_packages: ${list.concat(processed_packages, [pkg_result.body])}
+                          except:
+                            as: err
+                            steps:
+                              - add_failure:
+                                  assign:
+                                    - failed_packages: ${list.concat(failed_packages, [package_uri])}
     
-    # PASO 6: Enviar notificación por email con URLs firmadas
-    - send_completion_email:
-        call: http.post
-        args:
-          url: ${sys.get_env("EMAIL_SERVICE_URL") + "/send-completion-email"}
-          headers:
-            Content-Type: "application/json"
-          body:
-            processing_uuid: ${input.processing_uuid}
-            original_file: ${input.original_file}
-            total_shipments: ${input.total_shipments}
-            packages_processed: ${len(input.packages)}
-            signed_urls: ${signed_urls_collection.urls}
-            processing_summary: ${image_processing_result.summary}
-          timeout: 60
-        result: email_result
+    # Verificar estado
+    - check_status:
+        try:
+          call: http.get
+          args:
+            url: ${image_service_url + "/processing-status/" + processing_uuid}
+            timeout: 30
+          result: status_result
+        except:
+          as: e
+          assign:
+            - status_result:
+                code: 404
+                body:
+                  status: "not_found"
     
-    # PASO 7: Programar cleanup automático para TODOS los paquetes
-    - schedule_cleanup_all:
-        call: schedule_cleanup_for_all_packages
-        args:
-          processing_uuid: ${input.processing_uuid}
-          cleanup_after_hours: 24
-        result: cleanup_scheduled
+    # Enviar email
+    - send_email:
+        try:
+          call: http.post
+          args:
+            url: ${email_service_url + "/send-completion-email"}
+            headers:
+              Content-Type: "application/json"
+            body:
+              processing_uuid: ${processing_uuid}
+              original_file: ${original_file}
+              total_shipments: ${total_shipments}
+              packages_processed: ${len(processed_packages)}
+              packages_failed: ${len(failed_packages)}
+            timeout: 60
+          result: email_result
+        except:
+          as: e
+          assign:
+            - email_result:
+                code: 500
+                body:
+                  message: "email_failed"
     
-    # PASO 8: Actualizar estado final en base de datos
-    - update_final_status:
-        call: http.post
-        args:
-          url: ${sys.get_env("IMAGE_PROCESSING_SERVICE_URL") + "/update-workflow-completion"}
-          body:
-            processing_uuid: ${input.processing_uuid}
-            workflow_completed: true
-            email_sent: ${email_result.code == 200}
-            cleanup_scheduled: ${cleanup_scheduled.success}
-            completion_summary:
-              packages_processed: ${len(input.packages)}
-              images_processed: ${image_processing_result.total_images}
-              urls_generated: ${len(signed_urls_collection.urls)}
-        result: final_update
+    # Actualizar estado final
+    - update_status:
+        try:
+          call: http.post
+          args:
+            url: ${image_service_url + "/update-workflow-completion"}
+            headers:
+              Content-Type: "application/json"
+            body:
+              processing_uuid: ${processing_uuid}
+              workflow_completed: true
+              packages_processed: ${len(processed_packages)}
+              packages_failed: ${len(failed_packages)}
+            timeout: 30
+          result: update_result
+        except:
+          as: e
+          assign:
+            - update_result:
+                code: 500
+                body:
+                  message: "update_failed"
     
-    # Resultado final exitoso
-    - return_success:
+    # Retornar resultado
+    - return_result:
         return:
           status: "completed"
-          processing_uuid: ${input.processing_uuid}
-          workflow_completed_at: ${text.split(time.format(sys.now()), "T")[0] + "T" + text.split(time.format(sys.now()), "T")[1]}
-          image_processing_result: ${image_processing_result}
-          email_result: ${email_result.body}
-          signed_urls_count: ${len(signed_urls_collection.urls)}
-          cleanup_scheduled: ${cleanup_scheduled}
-          final_status: ${final_update.body}
-    
-    # MANEJO DE ERRORES
-    - handle_image_processing_error:
-        call: send_error_notification
-        args:
-          error_type: "image_processing_error" 
-          error_message: "Procesamiento de imágenes incompleto"
-          processing_uuid: ${input.processing_uuid}
-        result: error_notification
-        next: return_error
-    
-    - return_error:
-        return:
-          status: "failed"
-          processing_uuid: ${input.processing_uuid}
-          error: ${error_notification}
-          failed_at: ${text.split(time.format(sys.now()), "T")[0] + "T" + text.split(time.format(sys.now()), "T")[1]}
-
-# Subrutina: Validar input del workflow
-validate_workflow_input:
-  params: [workflow_input]
-  steps:
-    - check_required_fields:
-        switch:
-          - condition: ${"processing_uuid" in workflow_input}
-            next: check_packages
-          - condition: true
-            raise: "Campo processing_uuid requerido"
-    
-    - check_packages:
-        switch:
-          - condition: ${"packages" in workflow_input}
-            next: validation_complete
-          - condition: true
-            raise: "Campo packages requerido"
-    
-    - validation_complete:
-        return: 
-          valid: true
-          message: "Input validado exitosamente"
-
-# Subrutina: Procesar paquetes en paralelo
-process_packages_in_parallel:
-  params: [processing_uuid, packages]
-  steps:
-    - init_results:
-        assign:
-          - results: []
-          - package_count: ${len(packages)}
-    
-    # Procesar cada paquete (en paralelo via parallel iteration)
-    - process_all_packages:
-        parallel:
-          for:
-            value: package_uri
-            in: ${packages}
-          steps:
-            - extract_package_info:
-                assign:
-                  - package_name: ${text.split(package_uri, "/")[-1]}
-            
-            - call_image_processor:
-                call: http.post
-                args:
-                  url: ${sys.get_env("IMAGE_PROCESSING_SERVICE_URL") + "/process-package"}
-                  body:
-                    processing_uuid: ${processing_uuid}
-                    package_uri: ${package_uri}
-                    package_name: ${package_name}
-                result: package_result
-            
-            - store_result:
-                assign:
-                  - results: ${list.concat(results, package_result.body)}
-        
-        result: parallel_results
-    
-    - aggregate_results:
-        return:
-          total_packages_processed: ${len(parallel_results)}
-          processing_results: ${parallel_results}
-          aggregated_stats:
-            total_images_processed: ${sum([result.images_processed for result in parallel_results])}
-            total_zip_files_created: ${len([result for result in parallel_results if result.zip_created])}
-
-# Subrutina: Verificar que todos los paquetes fueron procesados
-verify_all_packages_processed:
-  params: [processing_uuid, expected_packages]
-  steps:
-    - check_processing_record:
-        call: http.get
-        args:
-          url: ${sys.get_env("IMAGE_PROCESSING_SERVICE_URL") + "/processing-status/" + processing_uuid}
-        result: processing_status
-    
-    - verify_completeness:
-        switch:
-          - condition: ${processing_status.body.packages_completed >= expected_packages}
-            next: completeness_verified
-          - condition: true
-            raise: ${"Procesamiento incompleto: " + string(processing_status.body.packages_completed) + " de " + string(expected_packages) + " paquetes completados"}
-    
-    - completeness_verified:
-        return:
-          complete: true
-          packages_processed: ${processing_status.body.packages_completed}
-          verification_timestamp: ${text.split(time.format(sys.now()), "T")[0] + "T" + text.split(time.format(sys.now()), "T")[1]}
-
-# Subrutina de manejo de errores
-handle_workflow_error:
-  params: [error_info]
-  steps:
-    - log_error:
-        call: http.post
-        args:
-          url: ${sys.get_env("EMAIL_SERVICE_URL") + "/send-error-notification"}
-          body:
-            error_type: "workflow_error"
-            error_message: ${error_info.message}
-            processing_uuid: ${error_info.processing_uuid}
-            timestamp: ${text.split(time.format(sys.now()), "T")[0] + "T" + text.split(time.format(sys.now()), "T")[1]}
-    
-    - return_error:
-        raise: ${error_info.message}
+          processing_uuid: ${processing_uuid}
+          packages_total: ${len(packages)}
+          packages_processed: ${len(processed_packages)}
+          packages_failed: ${len(failed_packages)}
+          has_packages: ${has_packages}
+          email_sent: ${email_result.code == 200}
+          status_updated: ${update_result.code == 200}

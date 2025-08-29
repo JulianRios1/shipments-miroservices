@@ -186,7 +186,7 @@ class TestCompleteEndToEndFlow:
         mock_blob.upload_from_string.return_value = None
         mock_blob.exists.return_value = True
         
-        # Simulate file upload to json-pendientes bucket
+        # Simulate file upload to json-pending bucket
         json_content = json.dumps(sample_batch_json, indent=2)
         
         # Verify file was "uploaded"
@@ -203,7 +203,7 @@ class TestCompleteEndToEndFlow:
         
         # Simulate Cloud Storage trigger to Division Service
         division_payload = {
-            'bucket': 'json-pendientes',
+            'bucket': 'json-pending',
             'name': file_name,
             'eventType': 'google.storage.object.finalize'
         }

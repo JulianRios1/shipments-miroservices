@@ -1,341 +1,290 @@
 """
-Image Processing Service - Cloud Run 2
-Servicio responsable de:
-1. Procesar paquetes individuales de imágenes
-2. Descargar imágenes desde buckets de origen
-3. Crear archivo ZIP temporal por paquete
-4. Generar URL firmada con expiración de 2 horas
-5. Programar cleanup automático después de 24 horas
-6. Gestionar estado de procesamiento en base de datos
+Image Processing Service Simplificado - Sin base de datos
+Procesamiento directo y eficiente de paquetes de imágenes
 """
 
 import os
-import uuid
 import json
-import base64
-import asyncio
+import zipfile
+import shutil
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from flask import Flask, request, jsonify
-import sys
-import traceback
+from google.cloud import storage
 
-# Añadir shared_utils al path
-sys.path.insert(0, '/app/services/shared_utils/src')
-
-from config import config
-from logger import setup_logger
-from storage_service import storage_service
-from database_service import database_service
-
-from services.image_downloader import ImageDownloader
-from services.zip_creator import ZipCreator  
-from services.signed_url_generator import SignedUrlGenerator
-from services.cleanup_scheduler import CleanupScheduler
-from services.package_processor import PackageProcessor
-
-# Configurar Flask app
 app = Flask(__name__)
 
-# Configurar logger para este servicio
-logger = setup_logger(__name__, 'image-processing-service', config.APP_VERSION)
+# Cliente de Google Cloud Storage
+storage_client = storage.Client()
 
-# Inicializar servicios
-image_downloader = ImageDownloader()
-zip_creator = ZipCreator()
-signed_url_generator = SignedUrlGenerator()
-cleanup_scheduler = CleanupScheduler()
-package_processor = PackageProcessor()
-
+# Configuración
+TEMP_BASE = "/tmp/shipments_processing"
+PROCESSED_BUCKET = "shipments-processed"  # Corregido el nombre del bucket
+os.makedirs(TEMP_BASE, exist_ok=True)
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Health check endpoint para Cloud Run"""
+    """Health check endpoint"""
     return {
         'status': 'healthy',
-        'service': 'image-processing-service',
-        'version': config.APP_VERSION,
+        'service': 'image-processing-simple',
         'timestamp': datetime.now().isoformat()
     }, 200
 
-
-@app.route('/status', methods=['GET'])
-def status_check():
-    """Status endpoint con información detallada del servicio"""
-    try:
-        # Verificar conectividad a servicios dependientes
-        db_healthy = database_service.check_connectivity()
-        storage_healthy = storage_service.check_bucket_access(config.BUCKET_IMAGENES_TEMP)
-        
-        return {
-            'service': 'image-processing-service', 
-            'version': config.APP_VERSION,
-            'status': 'ready',
-            'dependencies': {
-                'database': 'healthy' if db_healthy else 'unhealthy',
-                'storage': 'healthy' if storage_healthy else 'unhealthy',
-            },
-            'configuration': {
-                'bucket_imagenes_temp': config.BUCKET_IMAGENES_TEMP,
-                'bucket_imagenes_originales': config.BUCKET_IMAGENES_ORIGINALES,
-                'signed_url_expiration_hours': config.SIGNED_URL_EXPIRATION_HOURS,
-                'cleanup_after_hours': config.TEMP_FILES_CLEANUP_HOURS
-            },
-            'timestamp': datetime.now().isoformat()
-        }, 200
-        
-    except Exception as e:
-        logger.error(f"Error en status check: {str(e)}", exc_info=True)
-        return {
-            'status': 'error',
-            'error': str(e),
-            'timestamp': datetime.now().isoformat()
-        }, 500
-
-
-
-
 @app.route('/process-package', methods=['POST'])
-def process_image_package():
+def process_package():
     """
-    Endpoint principal para procesar un paquete individual de imágenes
-    Llamado por Cloud Workflow para cada paquete
+    Endpoint principal para procesar un paquete de imágenes
     """
-    trace_id = str(uuid.uuid4())
-    
+    temp_dir = None
     try:
-        # Paso 1: Validar request
         data = request.get_json()
-        if not data:
-            logger.warning("No se recibieron datos válidos", trace_id=trace_id)
-            return {'error': 'No se recibieron datos válidos'}, 400
         
+        # Validar datos requeridos
         processing_uuid = data.get('processing_uuid')
         package_uri = data.get('package_uri')
-        package_name = data.get('package_name')
+        package_name = data.get('package_name', 'package')
         
-        if not all([processing_uuid, package_uri, package_name]):
-            logger.error("Faltan campos requeridos", context=data, trace_id=trace_id)
-            return {'error': 'Campos requeridos: processing_uuid, package_uri, package_name'}, 400
+        if not all([processing_uuid, package_uri]):
+            return {'error': 'Campos requeridos: processing_uuid, package_uri'}, 400
         
-        logger.info(
-            f"🚀 INICIANDO PROCESAMIENTO DE PAQUETE: {package_name}",
-            context={
-                'processing_uuid': processing_uuid,
-                'package_uri': package_uri,
-                'package_name': package_name
-            },
-            trace_id=trace_id
-        )
+        print(f"🚀 Procesando paquete: {package_name} ({processing_uuid})")
         
-        # Paso 2: Procesar paquete completo
-        result = package_processor.process_complete_package(
-            processing_uuid=processing_uuid,
-            package_uri=package_uri,
-            package_name=package_name,
-            trace_id=trace_id
-        )
+        # Crear directorio temporal
+        temp_dir = os.path.join(TEMP_BASE, f"{processing_uuid}_{package_name}")
+        os.makedirs(temp_dir, exist_ok=True)
         
-        logger.success(
-            f"🎉 PROCESAMIENTO DE PAQUETE COMPLETADO",
-            context={
-                'processing_uuid': processing_uuid,
-                'package_name': package_name,
-                'images_processed': result['images_processed'],
-                'zip_created': result['zip_created'],
-                'signed_url_generated': result['signed_url_generated']
-            },
-            trace_id=trace_id
-        )
+        # 1. Leer paquete JSON
+        package_data = read_package_from_gcs(package_uri)
+        if not package_data:
+            raise ValueError(f"No se pudo leer el paquete: {package_uri}")
         
+        # 2. Extraer rutas de imágenes
+        image_paths = extract_image_paths(package_data)
+        if not image_paths:
+            raise ValueError("No se encontraron imágenes en el paquete")
+        
+        print(f"📷 Encontradas {len(image_paths)} imágenes para procesar")
+        
+        # 3. Descargar imágenes
+        downloaded_files = download_images(image_paths, temp_dir)
+        if not downloaded_files:
+            raise ValueError("No se pudieron descargar imágenes")
+        
+        print(f"✅ Descargadas {len(downloaded_files)} imágenes")
+        
+        # 4. Crear ZIP
+        zip_filename = f"{package_name}.zip"
+        zip_path = os.path.join(temp_dir, zip_filename)
+        create_zip(downloaded_files, zip_path)
+        
+        # Obtener tamaño del ZIP
+        zip_size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+        print(f"📦 ZIP creado: {zip_size_mb:.2f} MB")
+        
+        # 5. Subir ZIP a bucket de procesados
+        blob_path = f"{processing_uuid}/{zip_filename}"
+        upload_to_gcs(zip_path, PROCESSED_BUCKET, blob_path)
+        
+        # 6. Generar URL firmada (2 horas de expiración)
+        signed_url = generate_signed_url(PROCESSED_BUCKET, blob_path, hours=2)
+        
+        # 7. Limpiar archivos temporales
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        
+        # 8. Retornar resultado exitoso
+        result = {
+            "success": True,
+            "processing_uuid": processing_uuid,
+            "package_name": package_name,
+            "images_processed": len(downloaded_files),
+            "zip_created": True,
+            "zip_size_mb": round(zip_size_mb, 2),
+            "signed_url": signed_url,
+            "signed_url_generated": True,
+            "expiration_time": (datetime.now() + timedelta(hours=2)).isoformat()
+        }
+        
+        print(f"✅ Procesamiento completado: {processing_uuid}")
         return result, 200
         
     except Exception as e:
-        error_msg = f"Error procesando paquete: {str(e)}"
-        logger.error(error_msg, trace_id=trace_id, exc_info=True)
+        # Limpiar en caso de error
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
         
-        # Log error for monitoring
-        logger.error(f"Error en procesamiento de paquete: {error_msg}", 
-                    context={
-                        'processing_uuid': processing_uuid if 'processing_uuid' in locals() else trace_id,
-                        'package_name': package_name if 'package_name' in locals() else 'unknown',
-                        'stack_trace': traceback.format_exc()
-                    },
-                    trace_id=trace_id)
+        error_msg = str(e)
+        print(f"❌ Error procesando paquete: {error_msg}")
         
-        return {'error': error_msg}, 500
-
+        # Retornar error
+        return {
+            "success": False,
+            "processing_uuid": data.get('processing_uuid', 'unknown'),
+            "package_name": data.get('package_name', 'unknown'),
+            "images_processed": 0,
+            "zip_created": False,
+            "signed_url": None,
+            "signed_url_generated": False,
+            "error": error_msg
+        }, 500
 
 @app.route('/processing-status/<processing_uuid>', methods=['GET'])
 def get_processing_status(processing_uuid: str):
     """
-    Endpoint para consultar estado de procesamiento de imágenes por UUID
+    Endpoint simplificado de estado - solo verifica si existe el ZIP
     """
-    trace_id = str(uuid.uuid4())
-    
     try:
-        logger.processing(f"Consultando estado de procesamiento de imágenes: {processing_uuid}", trace_id=trace_id)
+        # Verificar si existe algún archivo para este UUID
+        bucket = storage_client.bucket(PROCESSED_BUCKET)
+        blobs = list(bucket.list_blobs(prefix=f"{processing_uuid}/"))
         
-        # Buscar registro en base de datos
-        record = database_service.get_image_processing_record(processing_uuid, trace_id=trace_id)
-        
-        if not record:
-            return {'error': 'Procesamiento de imágenes no encontrado'}, 404
-        
-        # Formatear respuesta
-        response = {
-            'processing_uuid': processing_uuid,
-            'status': record['estado'],
-            'packages_completed': record['paquetes_completados'],
-            'total_packages': record['total_paquetes'],
-            'images_processed': record['imagenes_procesadas'],
-            'zip_files_created': record['archivos_zip_creados'],
-            'signed_urls_generated': record['urls_firmadas_generadas'],
-            'start_time': record['fecha_inicio'].isoformat() if record['fecha_inicio'] else None,
-            'end_time': record['fecha_finalizacion'].isoformat() if record['fecha_finalizacion'] else None,
-            'metadata': record['metadatos'],
-            'result': record['resultado']
-        }
-        
-        if record['error_mensaje']:
-            response['error_message'] = record['error_mensaje']
-        
-        return response, 200
-        
+        if blobs:
+            return {
+                'processing_uuid': processing_uuid,
+                'status': 'completed',
+                'files_found': len(blobs),
+                'files': [blob.name for blob in blobs]
+            }, 200
+        else:
+            return {
+                'processing_uuid': processing_uuid,
+                'status': 'not_found',
+                'message': 'No se encontraron archivos procesados'
+            }, 404
+            
     except Exception as e:
-        logger.error(f"Error consultando estado de procesamiento de imágenes: {str(e)}", trace_id=trace_id, exc_info=True)
         return {'error': str(e)}, 500
 
+# Funciones auxiliares
+
+def read_package_from_gcs(package_uri: str) -> Optional[Dict]:
+    """Lee el paquete JSON desde GCS"""
+    try:
+        if not package_uri.startswith("gs://"):
+            return None
+        
+        parts = package_uri[5:].split("/", 1)
+        if len(parts) != 2:
+            return None
+        
+        bucket_name, blob_path = parts
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+        
+        if not blob.exists():
+            return None
+        
+        content = blob.download_as_text()
+        return json.loads(content)
+        
+    except Exception as e:
+        print(f"Error leyendo paquete: {e}")
+        return None
+
+def extract_image_paths(package_data: Dict) -> List[str]:
+    """Extrae las rutas de imágenes del paquete"""
+    image_paths = []
+    
+    envios = package_data.get("envios", [])
+    for envio in envios:
+        imagenes = envio.get("imagenes", [])
+        image_paths.extend(imagenes)
+    
+    return image_paths
+
+def download_images(image_paths: List[str], temp_dir: str) -> List[str]:
+    """Descarga las imágenes a un directorio temporal"""
+    downloaded = []
+    
+    for i, image_path in enumerate(image_paths):
+        try:
+            # Manejar diferentes formatos de rutas
+            if image_path.startswith("gs://"):
+                uri = image_path
+            else:
+                # Si no tiene gs://, asumir que está en shipments-images
+                filename = os.path.basename(image_path)
+                uri = f"gs://shipments-images/{filename}"
+            
+            # Parsear URI
+            parts = uri[5:].split("/", 1)
+            if len(parts) != 2:
+                continue
+            
+            bucket_name, blob_path = parts
+            
+            # Descargar
+            bucket = storage_client.bucket(bucket_name)
+            blob = bucket.blob(blob_path)
+            
+            if not blob.exists():
+                # Intentar con .png si no existe
+                if not blob_path.endswith('.png'):
+                    blob = bucket.blob(blob_path + '.png')
+                    if not blob.exists():
+                        print(f"⚠️ Imagen no encontrada: {blob_path}")
+                        continue
+            
+            # Guardar localmente
+            local_filename = f"img_{i:04d}_{os.path.basename(blob_path)}"
+            local_path = os.path.join(temp_dir, local_filename)
+            blob.download_to_filename(local_path)
+            downloaded.append(local_path)
+            
+        except Exception as e:
+            print(f"Error descargando imagen {image_path}: {e}")
+            continue
+    
+    return downloaded
+
+def create_zip(files: List[str], zip_path: str):
+    """Crea un archivo ZIP con las imágenes"""
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for file_path in files:
+            if os.path.exists(file_path):
+                arcname = os.path.basename(file_path)
+                zipf.write(file_path, arcname)
+
+def upload_to_gcs(local_path: str, bucket_name: str, blob_path: str):
+    """Sube un archivo a GCS"""
+    try:
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+        blob.upload_from_filename(local_path)
+        print(f"✅ Archivo subido a gs://{bucket_name}/{blob_path}")
+    except Exception as e:
+        raise Exception(f"Error subiendo archivo: {str(e)}")
+
+def generate_signed_url(bucket_name: str, blob_path: str, hours: int = 2) -> str:
+    """Genera una URL firmada para descarga"""
+    try:
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+        
+        url = blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(hours=hours),
+            method="GET"
+        )
+        
+        return url
+    except Exception:
+        # Si falla la URL firmada, retornar la URL pública
+        return f"https://storage.googleapis.com/{bucket_name}/{blob_path}"
+
+# Endpoints que ya no necesitamos pero mantenemos para compatibilidad
+@app.route('/update-workflow-completion', methods=['POST'])
+def update_workflow_completion():
+    """Endpoint vacío para compatibilidad con el workflow"""
+    return {'status': 'ok', 'message': 'No database - nothing to update'}, 200
 
 @app.route('/schedule-cleanup', methods=['POST'])
 def schedule_cleanup():
-    """
-    Endpoint para programar limpieza de archivos temporales
-    """
-    trace_id = str(uuid.uuid4())
-    
-    try:
-        data = request.get_json()
-        processing_uuid = data.get('processing_uuid')
-        cleanup_after_hours = data.get('cleanup_after_hours', config.TEMP_FILES_CLEANUP_HOURS)
-        
-        if not processing_uuid:
-            return {'error': 'processing_uuid es requerido'}, 400
-        
-        logger.processing(f"Programando cleanup para procesamiento: {processing_uuid}", trace_id=trace_id)
-        
-        # Programar cleanup
-        cleanup_result = cleanup_scheduler.schedule_cleanup(
-            processing_uuid=processing_uuid,
-            cleanup_after_hours=cleanup_after_hours,
-            trace_id=trace_id
-        )
-        
-        logger.success(
-            f"Cleanup programado exitosamente",
-            context={
-                'processing_uuid': processing_uuid,
-                'cleanup_after_hours': cleanup_after_hours,
-                'scheduled_for': cleanup_result['scheduled_for']
-            },
-            trace_id=trace_id
-        )
-        
-        return cleanup_result, 200
-        
-    except Exception as e:
-        logger.error(f"Error programando cleanup: {str(e)}", trace_id=trace_id, exc_info=True)
-        return {'error': str(e)}, 500
-
-
-@app.route('/cleanup/execute/<processing_uuid>', methods=['POST'])
-def execute_cleanup(processing_uuid: str):
-    """
-    Endpoint para ejecutar cleanup inmediato (usado por Cloud Scheduler)
-    """
-    trace_id = str(uuid.uuid4())
-    
-    try:
-        logger.processing(f"Ejecutando cleanup inmediato para: {processing_uuid}", trace_id=trace_id)
-        
-        # Ejecutar cleanup
-        cleanup_result = cleanup_scheduler.execute_cleanup_now(
-            processing_uuid=processing_uuid,
-            trace_id=trace_id
-        )
-        
-        logger.success(
-            f"Cleanup ejecutado exitosamente",
-            context={
-                'processing_uuid': processing_uuid,
-                'files_deleted': cleanup_result['files_deleted'],
-                'storage_freed_mb': cleanup_result['storage_freed_mb']
-            },
-            trace_id=trace_id
-        )
-        
-        return cleanup_result, 200
-        
-    except Exception as e:
-        logger.error(f"Error ejecutando cleanup: {str(e)}", trace_id=trace_id, exc_info=True)
-        return {'error': str(e)}, 500
-
-
-@app.route('/update-workflow-completion', methods=['POST'])
-def update_workflow_completion():
-    """
-    Endpoint llamado por Cloud Workflow para actualizar el estado final
-    """
-    trace_id = str(uuid.uuid4())
-    
-    try:
-        data = request.get_json()
-        processing_uuid = data.get('processing_uuid')
-        workflow_completed = data.get('workflow_completed', False)
-        
-        if not processing_uuid:
-            return {'error': 'processing_uuid es requerido'}, 400
-        
-        logger.info(
-            f"Actualizando estado final de workflow: {processing_uuid}",
-            context={
-                'workflow_completed': workflow_completed,
-                'completion_data': data
-            },
-            trace_id=trace_id
-        )
-        
-        # Actualizar estado en base de datos
-        database_service.update_workflow_completion_status(
-            processing_uuid=processing_uuid,
-            workflow_data=data,
-            trace_id=trace_id
-        )
-        
-        return {
-            'status': 'updated',
-            'processing_uuid': processing_uuid,
-            'workflow_completed': workflow_completed
-        }, 200
-        
-    except Exception as e:
-        logger.error(f"Error actualizando estado final: {str(e)}", trace_id=trace_id, exc_info=True)
-        return {'error': str(e)}, 500
-
+    """Endpoint vacío para compatibilidad"""
+    return {'status': 'ok', 'message': 'No cleanup needed - files in GCS'}, 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8082))
-    debug = config.DEBUG
-    
-    logger.info(
-        f"🚀 Iniciando Image Processing Service",
-        context={
-            'port': port,
-            'debug': debug,
-            'version': config.APP_VERSION,
-            'bucket_imagenes_temp': config.BUCKET_IMAGENES_TEMP,
-            'bucket_imagenes_originales': config.BUCKET_IMAGENES_ORIGINALES
-        }
-    )
-    
-    app.run(host='0.0.0.0', port=port, debug=debug)
+    print(f"🚀 Image Processing Service Simplificado iniciando en puerto {port}")
+    app.run(host='0.0.0.0', port=port, debug=True)

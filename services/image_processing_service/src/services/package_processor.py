@@ -66,8 +66,7 @@ class PackageProcessor:
             # Crear registro de procesamiento en BD
             processing_record_id = database_service.create_image_processing_record(
                 processing_uuid=processing_uuid,
-                package_name=package_name,
-                package_uri=package_uri,
+                metadata={'package_name': package_name, 'package_uri': package_uri},
                 trace_id=trace_id
             )
             
@@ -293,17 +292,32 @@ class PackageProcessor:
                 self.logger.warning("No se encontraron envíos en el paquete", trace_id=trace_id)
                 return image_paths
             
-            # Extraer rutas de imágenes enriquecidas
-            rutas_imagenes = package_data.get('rutas_imagenes', {})
+            # Extraer rutas de imágenes de cada envío
+            # Los paquetes pueden tener la estructura 'imagenes' directamente en cada envío
+            # o pueden tener 'rutas_imagenes' como un diccionario separado
             
+            # Primero intentar con la estructura directa en cada envío
             for envio in envios:
                 envio_id = str(envio.get('id', ''))
-                if envio_id in rutas_imagenes:
-                    envio_image_paths = rutas_imagenes[envio_id]
-                    if isinstance(envio_image_paths, list):
-                        image_paths.extend(envio_image_paths)
-                    else:
-                        self.logger.warning(f"Rutas de imágenes inválidas para envío {envio_id}", trace_id=trace_id)
+                
+                # Buscar imágenes directamente en el envío
+                if 'imagenes' in envio:
+                    envio_images = envio.get('imagenes', [])
+                    if isinstance(envio_images, list):
+                        image_paths.extend(envio_images)
+                        self.logger.debug(f"Encontradas {len(envio_images)} imágenes en envío {envio_id}", trace_id=trace_id)
+            
+            # Si no se encontraron imágenes, buscar en rutas_imagenes (estructura alternativa)
+            if not image_paths and 'rutas_imagenes' in package_data:
+                rutas_imagenes = package_data.get('rutas_imagenes', {})
+                for envio in envios:
+                    envio_id = str(envio.get('id', ''))
+                    if envio_id in rutas_imagenes:
+                        envio_image_paths = rutas_imagenes[envio_id]
+                        if isinstance(envio_image_paths, list):
+                            image_paths.extend(envio_image_paths)
+                        else:
+                            self.logger.warning(f"Rutas de imágenes inválidas para envío {envio_id}", trace_id=trace_id)
             
             # Eliminar duplicados preservando orden
             unique_paths = []

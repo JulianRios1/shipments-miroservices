@@ -1,40 +1,6 @@
 version: '3.8'
 
 services:
-  # Base de datos PostgreSQL
-  postgres:
-    image: postgres:15
-    container_name: shipments-postgres
-    environment:
-      POSTGRES_DB: shipments_db
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: shipments123
-      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - shipments-network
-    restart: unless-stopped
-
-  # PgAdmin para administración de BD
-  pgadmin:
-    image: dpage/pgadmin4:latest
-    container_name: shipments-pgadmin
-    environment:
-      PGADMIN_DEFAULT_EMAIL: admin@shipments.com
-      PGADMIN_DEFAULT_PASSWORD: admin123
-      PGADMIN_CONFIG_SERVER_MODE: 'False'
-    ports:
-      - "8080:80"
-    volumes:
-      - pgadmin_data:/var/lib/pgadmin
-    networks:
-      - shipments-network
-    restart: unless-stopped
-    depends_on:
-      - postgres
 
   # Image Processing Service (Cloud Run)
   image-processing-service:
@@ -48,10 +14,10 @@ services:
       DEBUG: "true"
       PORT: "8082"
       BUCKET_IMAGENES_TEMP: "imagenes-temp-dev"
-      BUCKET_IMAGENES_ORIGINALES: "imagenes-originales-dev"
+      BUCKET_IMAGENES_ORIGINALES: "shipments-images-dev"
       DB_HOST: "postgres"
       DB_PORT: "5432"
-      DB_NAME: "shipments_db"
+      DB_NAME: "stage_images"
       DB_USER: "postgres"
       DB_PASSWORD: "shipments123"
       SIGNED_URL_EXPIRATION_HOURS: "2"
@@ -81,7 +47,7 @@ services:
       PORT: "8083"
       DB_HOST: "postgres"
       DB_PORT: "5432"
-      DB_NAME: "shipments_db"
+      DB_NAME: "stage_images"
       DB_USER: "postgres"
       DB_PASSWORD: "shipments123"
       SMTP_HOST: "mailhog"
@@ -94,7 +60,6 @@ services:
       - shipments-network
     restart: unless-stopped
     depends_on:
-      - postgres
       - mailhog
 
   # MailHog para desarrollo de emails
@@ -120,11 +85,6 @@ services:
       - shipments-network
     restart: unless-stopped
     command: redis-server --appendonly yes
-
-volumes:
-  postgres_data:
-  pgadmin_data:
-  redis_data:
 
 networks:
   shipments-network:

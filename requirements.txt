@@ -16,6 +16,7 @@ google-cloud-storage==2.10.0
 google-cloud-pubsub==2.18.4
 google-cloud-workflows==1.14.0
 google-cloud-logging==3.8.0
+google-cloud-scheduler==2.13.2
 google-auth==2.23.3
 google-cloud-core==2.3.3
 
